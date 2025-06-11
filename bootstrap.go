@@ -34,6 +34,7 @@ func (rn *RawNode) Bootstrap(peers []Peer) error {
 	if len(peers) == 0 {
 		return errors.New("must provide at least one peer to Bootstrap")
 	}
+	// 在初始化storage的时候会默认放上一个哨兵 它的index=0
 	lastIndex, err := rn.raft.raftLog.storage.LastIndex()
 	if err != nil {
 		return err
