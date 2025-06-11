@@ -22,14 +22,19 @@ import (
 
 type raftLog struct {
 	// storage contains all stable entries since the last snapshot.
+	// storage中数据在启动的时候会从snap和wal中恢复 包含两部分数据
+	// 已持久化/已提交 被quorum确认
+	// 已持久化/未提交 已写入wal但是还没同步给多数节点
 	storage Storage
 
 	// unstable contains all unstable entries and snapshot.
 	// they will be saved into storage.
+	// 未持久化/未提交 刚生成
 	unstable unstable
 
 	// committed is the highest log position that is known to be in
 	// stable storage on a quorum of nodes.
+	// 已在多数派节点同步成功的index 已提交 wal中也有
 	committed uint64
 	// applying is the highest log position that the application has
 	// been instructed to apply to its state machine. Some of these
@@ -44,6 +49,7 @@ type raftLog struct {
 	// entries in a Ready struct have been applied (either synchronously
 	// or asynchronously).
 	// Invariant: applied <= committed
+	// 已提交/已应用
 	applied uint64
 
 	logger Logger

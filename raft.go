@@ -123,6 +123,7 @@ func (st StateType) String() string {
 // Config contains the parameters to start a raft.
 type Config struct {
 	// ID is the identity of the local raft. ID cannot be 0.
+	// raft节点编号 1-based
 	ID uint64
 
 	// ElectionTick is the number of Node.Tick invocations that must pass between
@@ -377,6 +378,7 @@ type raft struct {
 	msgsAfterAppend []pb.Message
 
 	// the leader id
+	// 当前节点能够感知到的集群中Leader是谁
 	lead uint64
 	// leadTransferee is id of the leader transfer target when its value is not zero.
 	// Follow the procedure defined in raft thesis 3.10.
@@ -438,6 +440,7 @@ func newRaft(c *Config) *raft {
 	if err := c.validate(); err != nil {
 		panic(err.Error())
 	}
+	// raft中log entry的存储方式 就是一个内存数据库
 	raftlog := newLogWithSize(c.Storage, c.Logger, entryEncodingSize(c.MaxCommittedSizePerReady))
 	hs, cs, err := c.Storage.InitialState()
 	if err != nil {
@@ -445,7 +448,8 @@ func newRaft(c *Config) *raft {
 	}
 
 	r := &raft{
-		id:                          c.ID,
+		id: c.ID,
+		// 初始化的时候None
 		lead:                        None,
 		isLearner:                   false,
 		raftLog:                     raftlog,

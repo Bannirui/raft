@@ -268,6 +268,8 @@ func setupNode(c *Config, peers []Peer) *node {
 // It appends a ConfChangeAddNode entry for each given peer to the initial log.
 //
 // Peers must not be zero length; call RestartNode in that case.
+// 启动raft节点
+// @Param peers raft集群的各个节点配置
 func StartNode(c *Config, peers []Peer) Node {
 	n := setupNode(c, peers)
 	go n.run()
@@ -347,7 +349,10 @@ func (n *node) run() {
 	var rd Ready
 
 	r := n.rn.raft
-
+	// raft节点id 1-based 在每个节点内存中维护上一次感知到的Leader是谁 什么叫上一次 下面要进入线程的事件循环 所以在每一轮都看看Leader是不是发生了变化
+	// Leader发生变化无非就两种情况
+	// 1 有Leader->没有Leader
+	// 2 没有Leader->有Leader
 	lead := None
 
 	for {
@@ -364,16 +369,24 @@ func (n *node) run() {
 			readyc = n.readyc
 		}
 
+		// 这个地方还是挺巧妙的
+		// 集群Leader没有变化 也就是说当前这轮的事件循环的Leader还是之前那个 自然也就只有Leader的propc才会被订阅处理 Follower的propc还是空的 也就是说当前集群对外接收客户端写请求的还是之前Leader
 		if lead != r.lead {
+			// Leader发生了变化 当前集群有Leader就是易主了 当前集群没有Leader就是降级重新选举了
 			if r.hasLeader() {
 				if lead == None {
 					r.logger.Infof("raft.node: %x elected leader %x at term %d", r.id, r.lead, r.Term)
 				} else {
 					r.logger.Infof("raft.node: %x changed leader from %x to %x at term %d", r.id, lead, r.lead, r.Term)
 				}
+				// 现在集群有主 Leader是不是自己决定当前节点有没有权处理客户端写请求 怎么保证这个机制
+				// 当前是Leader 自己的propc就不是nil 下面自然可以订阅到数据
+				// 当前不是Leader 自己的propc是nil 下面case就会被跳过不执行了
+				// 也就达到了只有Leader才有权处理客户端写请求
 				propc = n.propc
 			} else {
 				r.logger.Infof("raft.node: %x lost leader %x at term %d", r.id, lead, r.Term)
+				// 无主状态 集群的中间态 对外拒绝写服务
 				propc = nil
 			}
 			lead = r.lead
@@ -384,20 +397,25 @@ func (n *node) run() {
 		// described in raft dissertation)
 		// Currently it is dropped in Step silently.
 		case pm := <-propc:
+			// golang的语法是 propc是nil时 相当于channel不存在 这条case语句就不会被执行
+			// 只有当前节点是Leader时propc才会被赋值 否则这个propc就是nill 实现了只有自己Leader才有资格接收客户端写请求
 			m := pm.m
 			m.From = r.id
+			// raft的核心逻辑 所有消息都在这处理
 			err := r.Step(m)
 			if pm.result != nil {
 				pm.result <- err
 				close(pm.result)
 			}
 		case m := <-n.recvc:
+			// 接收来自其他节点的raft消息
 			if IsResponseMsg(m.Type) && !IsLocalMsgTarget(m.From) && r.trk.Progress[m.From] == nil {
 				// Filter out response message from unknown From.
 				break
 			}
 			r.Step(m)
 		case cc := <-n.confc:
+			// 配置变更请求 比如添加节点
 			_, okBefore := r.trk.Progress[r.id]
 			cs := r.applyConfChange(cc)
 			// If the node was removed, block incoming proposals. Note that we
@@ -431,8 +449,11 @@ func (n *node) run() {
 			case <-n.done:
 			}
 		case <-n.tickc:
+			// 定时触发 驱动心跳和选举
 			n.rn.Tick()
 		case readyc <- rd:
+			// Ready是Raft给上层etcd的一份任务清单 包括 要写入WAL的entry 要发送给其他节点的消息 要apply到状态机的entry
+			// 写完WAL\发送消息\apply后 要等advancec通知继续
 			n.rn.acceptReady(rd)
 			if !n.rn.asyncStorageWrites {
 				advancec = n.advancec
@@ -441,6 +462,7 @@ func (n *node) run() {
 			}
 			readyc = nil
 		case <-advancec:
+			// 通知raft释放旧的ready Raft会清理掉unstable中的已持久化entry 更新applied指针 没有这个步骤 Raft无法前进 防止数据丢失
 			n.rn.Advance(rd)
 			rd = Ready{}
 			advancec = nil
