@@ -342,6 +342,7 @@ func (c *Config) validate() error {
 type raft struct {
 	id uint64
 
+	// 1-based
 	Term uint64
 	Vote uint64
 
@@ -378,7 +379,7 @@ type raft struct {
 	msgsAfterAppend []pb.Message
 
 	// the leader id
-	// 当前节点能够感知到的集群中Leader是谁
+	// 当前节点能够感知到的集群中Leader是谁 1-based 0表示没有Leader
 	lead uint64
 	// leadTransferee is id of the leader transfer target when its value is not zero.
 	// Follow the procedure defined in raft thesis 3.10.
@@ -892,6 +893,9 @@ func (r *raft) tickHeartbeat() {
 	}
 }
 
+// 当前节点角色转换为Follower
+// @Param term 任期号 1-based
+// @Param lead 集群Leader的id 1-based
 func (r *raft) becomeFollower(term uint64, lead uint64) {
 	r.step = stepFollower
 	r.reset(term)

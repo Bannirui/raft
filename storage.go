@@ -113,6 +113,7 @@ type MemoryStorage struct {
 func NewMemoryStorage() *MemoryStorage {
 	return &MemoryStorage{
 		// When starting from scratch populate the list with a dummy entry at term zero.
+		// 在用snap和wal恢复数据前 会初始化一个Storage 在初始化的时候就保证了ents不空 避免了新系统没有历史数据还要判空的场景
 		ents: make([]pb.Entry, 1),
 	}
 }
@@ -179,6 +180,7 @@ func (ms *MemoryStorage) LastIndex() (uint64, error) {
 }
 
 func (ms *MemoryStorage) lastIndex() uint64 {
+	// 能直接用脚标直接索引 说明虽然系统刚启动 但是在MemoryStorage#ents中已经有了数据 说明raft做了边界处理 为了省去判空和数组越界 它初始化了哨兵数据
 	return ms.ents[0].Index + uint64(len(ms.ents)) - 1
 }
 
@@ -208,7 +210,7 @@ func (ms *MemoryStorage) ApplySnapshot(snap pb.Snapshot) error {
 	ms.Lock()
 	defer ms.Unlock()
 
-	//handle check for old snapshot being applied
+	// handle check for old snapshot being applied
 	msIndex := ms.snapshot.Metadata.Index
 	snapIndex := snap.Metadata.Index
 	if msIndex >= snapIndex {

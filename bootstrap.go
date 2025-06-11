@@ -27,6 +27,9 @@ import (
 // It is recommended that instead of calling this method, applications bootstrap
 // their state manually by setting up a Storage that has a first index > 1 and
 // which stores the desired ConfState as its InitialState.
+// 方法的名称可能有误导 并不是真正的启动节点
+// raft是典型的EDA架构 log entry就是线程事件循环的事件源
+// 在系统最开始启动时 磁盘上是干净的 没有任何log entry 所以这个地方仅仅在给启动做准备工作 人为构建log entry
 func (rn *RawNode) Bootstrap(peers []Peer) error {
 	if len(peers) == 0 {
 		return errors.New("must provide at least one peer to Bootstrap")
