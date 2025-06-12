@@ -39,28 +39,51 @@ message Snapshot {
 // For description of different message types, see:
 // https://pkg.go.dev/go.etcd.io/raft/v3#hdr-MessageType
 enum MessageType {
+	// 发起选举 Local节点 自我提升为Candidate
 	MsgHup               = 0;
+	// 心跳
 	MsgBeat              = 1;
+	// 客户端提议新entry
 	MsgProp              = 2;
+	// AppendEntries RPC
 	MsgApp               = 3;
+	// AppendEntries响应
 	MsgAppResp           = 4;
+	// 请求投票
 	MsgVote              = 5;
+	// 投票响应
 	MsgVoteResp          = 6;
+	// 快照发送
 	MsgSnap              = 7;
+	// 心跳
 	MsgHeartbeat         = 8;
+	// 心跳响应
 	MsgHeartbeatResp     = 9;
+	// 某节点失联
 	MsgUnreachable       = 10;
+	// 快照是否成功
 	MsgSnapStatus        = 11;
+	// leader检查quorum
 	MsgCheckQuorum       = 12;
+	// 请求转移Leader
 	MsgTransferLeader    = 13;
+	// 立即发起选举 转移领导
 	MsgTimeoutNow        = 14;
+	// 请求读一致性索引
 	MsgReadIndex         = 15;
+	// 返回读一致性索引
 	MsgReadIndexResp     = 16;
+	// 预选投票 先测试选举是否可能
 	MsgPreVote           = 17;
+	// 预选投票响应 是否同意候选资格
 	MsgPreVoteResp       = 18;
+	// 请求写WAL
 	MsgStorageAppend     = 19;
+	// WAL写入完成
 	MsgStorageAppendResp = 20;
+	// 请求apply到状态机
 	MsgStorageApply      = 21;
+	// 应用完成 推进applied指针
 	MsgStorageApplyResp  = 22;
 	MsgForgetLeader      = 23;
 	// NOTE: when adding new message types, remember to update the isLocalMsg and

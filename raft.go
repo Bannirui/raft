@@ -227,6 +227,7 @@ type Config struct {
 	// PreVote enables the Pre-Vote algorithm described in raft thesis section
 	// 9.6. This prevents disruption when a node that has been partitioned away
 	// rejoins the cluster.
+	// etcd初始化这个Config的时候没有显式指定这个值 因此是默认值false
 	PreVote bool
 
 	// ReadOnlyOption specifies how the read only request is processed.
@@ -412,6 +413,7 @@ type raft struct {
 	heartbeatElapsed int
 
 	checkQuorum bool
+	// 初始化raft时候这个成员值指定的是raft#Config的值 而Config的初始化发生在etcd中 在初始化Config的时候没有显式指定Prevote 所以这个地方prevote默认也是false
 	preVote     bool
 
 	heartbeatTimeout int
@@ -423,6 +425,10 @@ type raft struct {
 	disableProposalForwarding bool
 	stepDownOnRemoval         bool
 
+	// 定时任务 这个地方仅仅是回调函数 执行时机raft不关注 由上层的etcd通过ticker定时器向Node#tickc发送消息 raft的线程事件循环再订阅这个tickc 有消息进来说明一个周期到了再回调Node#RawNode#raft#tick这个函数
+	// 根据角色不同 这个回调函数无非就两个
+	// Leader是tickHeartbeat
+	// Follower是tickElection
 	tick func()
 	step stepFunc
 
@@ -461,6 +467,7 @@ func newRaft(c *Config) *raft {
 		heartbeatTimeout:            c.HeartbeatTick,
 		logger:                      c.Logger,
 		checkQuorum:                 c.CheckQuorum,
+		// Config的初始化发生在etcd中 初始化的时候没显式指定Prevote 因此这个成员是默认值false
 		preVote:                     c.PreVote,
 		readOnly:                    newReadOnly(c.ReadOnlyOption),
 		disableProposalForwarding:   c.DisableProposalForwarding,
@@ -1097,7 +1104,7 @@ func (r *raft) Step(m pb.Message) error {
 	switch {
 	case m.Term == 0:
 		// local message
-	case m.Term > r.Term:
+
 		if m.Type == pb.MsgVote || m.Type == pb.MsgPreVote {
 			force := bytes.Equal(m.Context, []byte(campaignTransfer))
 			inLease := r.checkQuorum && r.lead != None && r.electionElapsed < r.electionTimeout

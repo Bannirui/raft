@@ -303,6 +303,11 @@ type node struct {
 	confstatec chan pb.ConfState
 	readyc     chan Ready
 	advancec   chan struct{}
+	// raft的实现仅仅关注raft层面的核心逻辑 关于定时任务Leader定时Append Entry和Follower定时检测心跳超时没接到进行选主拉票 raft没有实现定时器 定时器实现在etcd中
+	// 定时器触发后通过ticket channel通信告诉raft模块该触发定时任务执行了
+	// 定时任务的回调方法维护在raft#tick
+	// Leader的定时任务是tickElection
+	// Follower的定时任务是tickHeartbeat
 	tickc      chan struct{}
 	done       chan struct{}
 	stop       chan struct{}
