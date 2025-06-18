@@ -147,6 +147,8 @@ func (c Changer) Simple(ccs ...pb.ConfChangeSingle) (tracker.Config, tracker.Pro
 // apply a change to the configuration. By convention, changes to voters are
 // always made to the incoming majority config Voters[0]. Voters[1] is either
 // empty or preserves the outgoing majority configuration while in a joint state.
+// 所谓的集群配置变更 可以是加入集群也可以是脱离集群
+// 启动的时候是加入集群 对应的消息类型就是ConfChangeAddNode
 func (c Changer) apply(cfg *tracker.Config, trk tracker.ProgressMap, ccs ...pb.ConfChangeSingle) error {
 	for _, cc := range ccs {
 		if cc.NodeID == 0 {
@@ -156,6 +158,7 @@ func (c Changer) apply(cfg *tracker.Config, trk tracker.ProgressMap, ccs ...pb.C
 			continue
 		}
 		switch cc.Type {
+		// 把节点加到Voters中
 		case pb.ConfChangeAddNode:
 			c.makeVoter(cfg, trk, cc.NodeID)
 		case pb.ConfChangeAddLearnerNode:
@@ -175,6 +178,7 @@ func (c Changer) apply(cfg *tracker.Config, trk tracker.ProgressMap, ccs ...pb.C
 
 // makeVoter adds or promotes the given ID to be a voter in the incoming
 // majority config.
+// raft#trk#Config#Voters中维护着集群节点 每个raft节点可以通过这个Voters知道谁跟自己在同一个集群 发送拉票请求的时候知道可以向谁发起拉票
 func (c Changer) makeVoter(cfg *tracker.Config, trk tracker.ProgressMap, id uint64) {
 	pr := trk[id]
 	if pr == nil {
@@ -244,8 +248,11 @@ func (c Changer) remove(cfg *tracker.Config, trk tracker.ProgressMap, id uint64)
 }
 
 // initProgress initializes a new progress for the given node or learner.
+// 把节点加到Voters中
+// @Param raft集群节点id
 func (c Changer) initProgress(cfg *tracker.Config, trk tracker.ProgressMap, id uint64, isLearner bool) {
 	if !isLearner {
+		// 把id加到了Voters中
 		incoming(cfg.Voters)[id] = struct{}{}
 	} else {
 		nilAwareAdd(&cfg.Learners, id)

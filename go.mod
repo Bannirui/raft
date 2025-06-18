@@ -1,4 +1,5 @@
-module go.etcd.io/raft/v3
+// 重命名给etcd用
+module github.com/Bannirui/raft/v3
 
 go 1.24
 

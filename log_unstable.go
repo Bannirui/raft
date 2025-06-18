@@ -30,12 +30,16 @@ import pb "go.etcd.io/raft/v3/raftpb"
 // Note that unstable.offset may be less than the highest log
 // position in storage; this means that the next write to storage
 // might need to truncate the log before persisting unstable.entries.
+// 还没有被持久化的日志 也就是还没有写WAL或Snapshot
 type unstable struct {
 	// the incoming unstable snapshot, if any.
+	// 还没有持久化的snap
 	snapshot *pb.Snapshot
 	// all entries that have not yet been written to storage.
+	// 还没有持久化的日志
 	entries []pb.Entry
 	// entries[i] has raft log position i+offset.
+	// entries中每个日志相对整个raft的index 自身数组脚标+offset就是在整个raft中的index
 	offset uint64
 
 	// if true, snapshot is being written to storage.
@@ -193,10 +197,12 @@ func (u *unstable) restore(s pb.Snapshot) {
 	u.snapshotInProgress = false
 }
 
+// unstable中缓存的都是没有持久化的日志 把ents缓存到unstable中
 func (u *unstable) truncateAndAppend(ents []pb.Entry) {
 	fromIndex := ents[0].Index
 	switch {
 	case fromIndex == u.offset+uint64(len(u.entries)):
+		// ents刚好跟unstable无缝衔接
 		// fromIndex is the next index in the u.entries, so append directly.
 		u.entries = append(u.entries, ents...)
 	case fromIndex <= u.offset:

@@ -29,9 +29,10 @@ import (
 // which stores the desired ConfState as its InitialState.
 // 方法的名称可能有误导 并不是真正的启动节点
 // raft是典型的EDA架构 log entry就是线程事件循环的事件源
-// 在系统最开始启动时 磁盘上是干净的 没有任何log entry 所以这个地方仅仅在给启动做准备工作 人为构建log entry 所以这个方法就做了两件事
+// 在系统最开始启动时 磁盘上是干净的 没有任何log entry 所以这个地方仅仅在给启动做准备工作
+// 人为构建LogEntry 模拟AppendEntries和applyConfChange的流程 让raft节点的Voters能感知到整个集群的配置
 // 1 初始化节点角色是Follower 等心跳超时事件进来 发现自己是Follower 触发选主
-// 2 造日志entry 在选主流程中要用到
+// 2 造LogEntry 复位Voters 在选主流程中要用到
 func (rn *RawNode) Bootstrap(peers []Peer) error {
 	if len(peers) == 0 {
 		return errors.New("must provide at least one peer to Bootstrap")
@@ -56,6 +57,8 @@ func (rn *RawNode) Bootstrap(peers []Peer) error {
 	// bootstrap the initial membership in a cleaner way.
 	// 角色初始化为Follower 为什么是Follower 因为心跳超时事件后发现自己是Follower就会触发选主
 	rn.raft.becomeFollower(1, None)
+	// 集群的配置 模拟成RPC 既然是模拟 这个地方就假装收到了Leader的AppendEntries就行
+	// 下面就模拟收到AppendEntries的候选流程先放到unstable中 因为是模拟的 所以并不需要对这些模拟的RPC进行回复 直接commit然后应用到raft状态机
 	ents := make([]pb.Entry, len(peers))
 	for i, peer := range peers {
 		cc := pb.ConfChange{Type: pb.ConfChangeAddNode, NodeID: peer.ID, Context: peer.Context}
@@ -66,6 +69,7 @@ func (rn *RawNode) Bootstrap(peers []Peer) error {
 
 		ents[i] = pb.Entry{Type: pb.EntryConfChange, Term: 1, Index: uint64(i + 1), Data: data}
 	}
+	// 缓存到unstable中
 	rn.raft.raftLog.append(ents...)
 
 	// Now apply them, mainly so that the application can call Campaign
@@ -80,8 +84,11 @@ func (rn *RawNode) Bootstrap(peers []Peer) error {
 	//
 	// TODO(bdarnell): These entries are still unstable; do we need to preserve
 	// the invariant that committed < unstable?
+	// 模拟这些日志被集群大多数节点认可 也就是直接commit就行
 	rn.raft.raftLog.committed = uint64(len(ents))
 	for _, peer := range peers {
+		// 应用到状态机 这边就会轮询把集群中节点都加到Voters中
+		// 类型是ConfChangeAddNode 后面raft#trk会根据这个类型把节点id加到raft#trk#Config#Voters中
 		rn.raft.applyConfChange(pb.ConfChange{NodeID: peer.ID, Type: pb.ConfChangeAddNode}.AsV2())
 	}
 	return nil

@@ -177,6 +177,7 @@ func (c MajorityConfig) VoteResult(votes map[uint64]bool) VoteResult {
 	for id := range c {
 		v, ok := votes[id]
 		if !ok {
+			// 还没投票的节点数量 可能人家还没发起投票 也可能投票结果还在路上
 			missing++
 			continue
 		}
@@ -184,8 +185,9 @@ func (c MajorityConfig) VoteResult(votes map[uint64]bool) VoteResult {
 			votedCnt++
 		}
 	}
-
+	// 集群半数节点数量是多少
 	q := len(c)/2 + 1
+	// 对自己投赞成票的过半
 	if votedCnt >= q {
 		return VoteWon
 	}

@@ -354,7 +354,7 @@ type raft struct {
 
 	maxMsgSize         entryEncodingSize
 	maxUncommittedSize entryPayloadSize
-
+	// 对集群节点的状态跟踪
 	trk tracker.ProgressTracker
 
 	state StateType
@@ -366,6 +366,7 @@ type raft struct {
 	// other nodes.
 	//
 	// Messages in this list must target other nodes.
+	// 要立即发送的消息 只能是当前节点要往集群中其他节点发送的消息 比如心跳\投票请求\Append Entries
 	msgs []pb.Message
 	// msgsAfterAppend contains the list of messages that should be sent after
 	// the accumulated unstable state (e.g. term, vote, []entry, and snapshot)
@@ -377,6 +378,14 @@ type raft struct {
 	//
 	// Messages in this list have the type MsgAppResp, MsgVoteResp, or
 	// MsgPreVoteResp. See the comment in raft.send for details.
+	// 必须等日志等状态持久化后再发送的消息
+	// 可以是要发送给集群中其他节点的消息 也可以是自己要发送给自己的消息
+	// 只包含响应类消息MsgAppResp/MsgVoteResp/MsgPreVoteResp
+	// 为什么要区分两类消息 一个立即发送 一个只有在本地完成持久化之后才能向其他节点发送确认响应 这个原则可以防止节点崩溃后出现数据不一致的情况 比如
+	// 如果follower收到leader的AppendEntries请求后 立刻发送MsgAppResp响应但它还没把日志写入磁盘
+	// 若此时follower崩溃/重启后这条日志丢了
+	// 但leader已经以为follower成功持久化这条日志 从而继续推进commit 最终造成整个集群数据不一致
+	// 所以这些响应类消息 只能在真正完成持久化之后发送
 	msgsAfterAppend []pb.Message
 
 	// the leader id
@@ -430,6 +439,7 @@ type raft struct {
 	// Leader是tickHeartbeat
 	// Follower是tickElection
 	tick func()
+	// 不同角色的step回调不一样
 	step stepFunc
 
 	logger Logger
@@ -862,8 +872,11 @@ func (r *raft) appendEntry(es ...pb.Entry) (accepted bool) {
 func (r *raft) tickElection() {
 	r.electionElapsed++
 
+	// 当前节点有资格晋升为Leader 心跳超时
 	if r.promotable() && r.pastElectionTimeout() {
+		// 重置 准备进入下一轮
 		r.electionElapsed = 0
+		// 这个地方的设计很巧妙 因为term是1-based的 索引用term 0天然标识本地消息驱动流程
 		if err := r.Step(pb.Message{From: r.id, Type: pb.MsgHup}); err != nil {
 			r.logger.Debugf("error occurred during election: %v", err)
 		}
@@ -1044,6 +1057,7 @@ func (r *raft) campaign(t CampaignType) {
 		r.logger.Warningf("%x is unpromotable; campaign() should have been called", r.id)
 	}
 	var term uint64
+	// 消息类型
 	var voteMsg pb.MessageType
 	if t == campaignPreElection {
 		r.becomePreCandidate()
@@ -1051,11 +1065,14 @@ func (r *raft) campaign(t CampaignType) {
 		// PreVote RPCs are sent for the next term before we've incremented r.Term.
 		term = r.Term + 1
 	} else {
+		// 启动后节点的初始化角色是Follower term是0 这个时候会转化角色为Candidate term变成1
 		r.becomeCandidate()
+		// 拉票类型的消息
 		voteMsg = pb.MsgVote
 		term = r.Term
 	}
 	var ids []uint64
+	// 跟
 	{
 		idMap := r.trk.Voters.IDs()
 		ids = make([]uint64, 0, len(idMap))
@@ -1064,6 +1081,8 @@ func (r *raft) campaign(t CampaignType) {
 		}
 		slices.Sort(ids)
 	}
+	// 向集群的有节点发送拉票请求 这个地方很关键 这个集群中节点id从哪儿来的 从raft#trk#Voters中来 那么trk中的信息哪儿来的呢
+	// 集群首次初始化的时候干干净净 没有WAL没有snapshot 也没有Voters 所以raft提供了一个手动启动的入口 手动append+applyConfChange的方式把集群信息放到了Voters中 不然这个地方根本没办法执行下去
 	for _, id := range ids {
 		if id == r.id {
 			// The candidate votes for itself and should account for this self
@@ -1083,17 +1102,23 @@ func (r *raft) campaign(t CampaignType) {
 		if t == campaignTransfer {
 			ctx = []byte(t)
 		}
+		// 放到raft的msgs表示要立即发送的消息 上层etcd会来这取数据进行发送
 		r.send(pb.Message{To: id, Term: term, Type: voteMsg, Index: last.index, LogTerm: last.term, Context: ctx})
 	}
 }
 
+// 收到了来自id的一次投票
+// @Param id 谁发的投票
+// @Param v 投的什么票 True表示赞成票 False表示反对票
 func (r *raft) poll(id uint64, t pb.MessageType, v bool) (granted int, rejected int, result quorum.VoteResult) {
 	if v {
 		r.logger.Infof("%x received %s from %x at term %d", r.id, t, id, r.Term)
 	} else {
 		r.logger.Infof("%x received %s rejection from %x at term %d", r.id, t, id, r.Term)
 	}
+	// 统计投票
 	r.trk.RecordVote(id, v)
+	// 统计得票结果
 	return r.trk.TallyVotes()
 }
 
@@ -1102,6 +1127,7 @@ func (r *raft) Step(m pb.Message) error {
 
 	// Handle the message term, which may result in our stepping down to a follower.
 	switch {
+	// term是1-based 也就意味着RPC的消息term>=1 所以用0标识是本地消息驱动本机流程
 	case m.Term == 0:
 		// local message
 
@@ -1704,6 +1730,7 @@ func stepCandidate(r *raft, m pb.Message) error {
 		r.becomeFollower(m.Term, m.From) // always m.Term == r.Term
 		r.handleSnapshot(m)
 	case myVoteRespType:
+		// 收到了别人对自己的选举投票 触发得票统计看看自己有没有竞选Leader成功
 		gr, rj, res := r.poll(m.From, m.Type, !m.Reject)
 		r.logger.Infof("%x has received %d %s votes and %d vote rejections", r.id, gr, m.Type, rj)
 		switch res {
@@ -1959,7 +1986,11 @@ func (r *raft) promotable() bool {
 	return pr != nil && !pr.IsLearner && !r.raftLog.hasNextOrInProgressSnapshot()
 }
 
+// ConfChangeAddNode类型的消息已经被raft执行完 unstable->commit
+// 现在要把应用到raft状态机
+// raft#trk会根据类型ConfChangeAddNode把集群节点id加到raft#trk#Config#Voters中
 func (r *raft) applyConfChange(cc pb.ConfChangeV2) pb.ConfState {
+	// 匿名函数
 	cfg, trk, err := func() (tracker.Config, tracker.ProgressMap, error) {
 		changer := confchange.Changer{
 			Tracker:   r.trk,
@@ -1968,6 +1999,7 @@ func (r *raft) applyConfChange(cc pb.ConfChangeV2) pb.ConfState {
 		if cc.LeaveJoint() {
 			return changer.LeaveJoint()
 		} else if autoLeave, ok := cc.EnterJoint(); ok {
+			// 把集群节点id加到Voters
 			return changer.EnterJoint(autoLeave, cc.Changes...)
 		}
 		return changer.Simple(cc.Changes...)

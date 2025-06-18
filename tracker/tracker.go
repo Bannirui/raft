@@ -25,6 +25,9 @@ import (
 
 // Config reflects the configuration tracked in a ProgressTracker.
 type Config struct {
+	// 集群中的节点信息
+	// 集群初始化启动的时候没有WAL和snap 通过手动append+applyConfChange的方式构造了集群节点的信息
+	// 也就是每个raft节点通过这个Voters可以感知到谁跟自己同处一个集群 自己竞选Leader时可以向谁拉票
 	Voters quorum.JointConfig
 	// AutoLeave is true if the configuration is joint and a transition to the
 	// incoming configuration should be carried out automatically by Raft when
@@ -114,11 +117,20 @@ func (c *Config) Clone() Config {
 // ProgressTracker tracks the currently active configuration and the information
 // known about the nodes and learners in it. In particular, it tracks the match
 // index for each peer which in turn allows reasoning about the committed index.
+// 对集群节点的状态跟踪
 type ProgressTracker struct {
+	// 配置变更支持联合共识JointConfig 这样Raft才能在扩缩容时安全处理
 	Config
-
+	// Leader专用的 跟踪日志状态
+	// 当某个节点成为Leader 它就会维护所有follower的日志复制状态
+	// 每个follower的match 它成功复制的最后一条日志索引
+	// 每个follower的next 下一次要发送给它的日志索引
+	// 为什么Leader需要对整个集群维护一个日志状态 因为这样就可以 重试失败的follower 基于多数的match决定什么时候可以commit一个日志 流控窗口
 	Progress ProgressMap
 
+	// 选举时 投票状态的统计
+	// 投票箱 哪些投了赞成票 哪些投了反对票 不在这个map的就是还没收到那个节点的投票结果
+	// 这个投票箱的目的是用来记录 某个节点在当前term中对谁投了票 当前候选人收到了多少投票
 	Votes map[uint64]bool
 
 	MaxInflight      int
@@ -131,6 +143,7 @@ func MakeProgressTracker(maxInflight int, maxBytes uint64) ProgressTracker {
 		MaxInflight:      maxInflight,
 		MaxInflightBytes: maxBytes,
 		Config: Config{
+			// 集群节点
 			Voters: quorum.JointConfig{
 				quorum.MajorityConfig{},
 				nil, // only populated when used
@@ -138,6 +151,7 @@ func MakeProgressTracker(maxInflight int, maxBytes uint64) ProgressTracker {
 			Learners:     nil, // only populated when used
 			LearnersNext: nil, // only populated when used
 		},
+		// 初始化的时候投票箱肯定是空的
 		Votes:    map[uint64]bool{},
 		Progress: map[uint64]*Progress{},
 	}
@@ -248,9 +262,13 @@ func (p *ProgressTracker) ResetVotes() {
 
 // RecordVote records that the node with the given id voted for this Raft
 // instance if v == true (and declined it otherwise).
+// 记录投票结果
+// @Param id 发起投票的raft节点
+// @Param v id对我竞选Leader的投票结果 True是赞成 False是反对
 func (p *ProgressTracker) RecordVote(id uint64, v bool) {
 	_, ok := p.Votes[id]
 	if !ok {
+		// 一个选举生命周期只统计别人对自己的一次投票
 		p.Votes[id] = v
 	}
 }

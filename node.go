@@ -107,6 +107,7 @@ type Ready struct {
 	//
 	// If it contains a MsgSnap message, the application MUST report back to raft
 	// when the snapshot has been received or has failed by calling ReportSnapshot.
+	// 立刻发送给其他节点的消息 必须等待Entries被WAL持久化之后再发送
 	Messages []pb.Message
 
 	// MustSync indicates whether the HardState and Entries must be durably
@@ -247,6 +248,7 @@ type Peer struct {
 	Context []byte
 }
 
+// 这个方法专门给不是从WAL恢复启动的方式 手动给raft进行初始化
 func setupNode(c *Config, peers []Peer) *node {
 	if len(peers) == 0 {
 		panic("no peers given; use RestartNode instead")
@@ -269,7 +271,9 @@ func setupNode(c *Config, peers []Peer) *node {
 //
 // Peers must not be zero length; call RestartNode in that case.
 // 启动raft节点
-// @Param peers raft集群的各个节点配置
+// 人为模拟AppendEntries和ApplyConfChange 目的是让raft#trk#Config#Voters里面有整个集群的节点信息 后面Leader心跳定时到期后Follower升级成Candidate发送竞选Leader消息才知道发给谁
+// 这个方法相当于raft提供的一个后门方法
+// @Param peers raft集群的各个节点配置 要把这些节点信息刷到raft#trk#Config#Voters里面
 func StartNode(c *Config, peers []Peer) Node {
 	n := setupNode(c, peers)
 	go n.run()
@@ -301,7 +305,9 @@ type node struct {
 	recvc      chan pb.Message
 	confc      chan pb.ConfChangeV2
 	confstatec chan pb.ConfState
+	// raft节点通知etcd自己有ready清单可以处理
 	readyc     chan Ready
+	// 异步方式下保证数据顺序同步的机制 raft把ready清单给etcd后 etcd处理完通过advance告诉raft raft没收到通知之前不要再向etcd发送ready清单
 	advancec   chan struct{}
 	// raft的实现仅仅关注raft层面的核心逻辑 关于定时任务Leader定时Append Entry和Follower定时检测心跳超时没接到进行选主拉票 raft没有实现定时器 定时器实现在etcd中
 	// 定时器触发后通过ticket channel通信告诉raft模块该触发定时任务执行了
@@ -347,7 +353,9 @@ func (n *node) Stop() {
 	<-n.done
 }
 
+// raft的线程模型 多路复用事件循环就体现在这
 func (n *node) run() {
+	// 都只声明 没有定义 赋值逻辑放在一些if条件里面 目的就是为了让select在channel为空的时候跳过
 	var propc chan msgWithResult
 	var readyc chan Ready
 	var advancec chan struct{}
@@ -361,6 +369,8 @@ func (n *node) run() {
 	lead := None
 
 	for {
+		// 在心跳超时后Follower会给msgs和msgsAfterAppend这两个集合放在数据 msgs放的是要给集群其他节点发送的拉票请求 msgsAfterAppend放的是模拟自己给自己的投票响应
+		// advancec的用途是什么 在不是异步存储的场景 默认就是同步方式 怎么保证相间的顺序是同步的呢 就是靠这个通信 raft把ready清单告诉etcd后就把advancec赋值 上层处理完后通过advancec告诉raft 再上层通知处理完之前raft不再向上层发送ready清单
 		if advancec == nil && n.rn.HasReady() {
 			// Populate a Ready. Note that this Ready is not guaranteed to
 			// actually be handled. We will arm readyc, but there's no guarantee
@@ -370,6 +380,7 @@ func (n *node) run() {
 			// handled first, but it's generally good to emit larger Readys plus
 			// it simplifies testing (by emitting less frequently and more
 			// predictably).
+			// ready清单
 			rd = n.rn.readyWithoutAccept()
 			readyc = n.readyc
 		}
@@ -456,11 +467,13 @@ func (n *node) run() {
 		case <-n.tickc:
 			// 定时触发 驱动心跳和选举
 			n.rn.Tick()
-		case readyc <- rd:
+		case readyc <- rd: // 把ready清单通过readyc通知给上层
 			// Ready是Raft给上层etcd的一份任务清单 包括 要写入WAL的entry 要发送给其他节点的消息 要apply到状态机的entry
 			// 写完WAL\发送消息\apply后 要等advancec通知继续
+			// 标记这一轮的ready清单已经被接收 仅仅是标记 我已经把ready清单交给上层了
 			n.rn.acceptReady(rd)
 			if !n.rn.asyncStorageWrites {
+				// 没有启用异步存储的情况意味着 我需要等上层处理完Ready清单(WAL写入+网络发送+状态应用)之后 再通过advancec回调通知我继续推进状态
 				advancec = n.advancec
 			} else {
 				rd = Ready{}
@@ -573,6 +586,7 @@ func (n *node) stepWithWaitOption(ctx context.Context, m pb.Message, wait bool) 
 
 func (n *node) Ready() <-chan Ready { return n.readyc }
 
+// 开放给上层etcd调用的 etcd收到raft的ready清单后进行处理 处理完后 调用这个方法向raft的advancec发送信号告诉raft之前的ready清单已经处理好了 可以继续发送ready清单了
 func (n *node) Advance() {
 	select {
 	case n.advancec <- struct{}{}:

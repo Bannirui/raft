@@ -140,10 +140,15 @@ func (rn *RawNode) Ready() Ready {
 // is no obligation that the Ready must be handled.
 func (rn *RawNode) readyWithoutAccept() Ready {
 	r := rn.raft
-
+	// 从当前raft状态中提取出一个完整的Ready结构体 只读快照 用于外部逻辑处理 如WAL持久化\发送消息\应用日志等
+	// 收集当前还未持久化的日志条目
+	// 外部收到Ready后 先持久化entries 然后才可以发Messages
 	rd := Ready{
+		// 未写入WAL的unstable entries 从unstable.offset开始
 		Entries:          r.raftLog.nextUnstableEnts(),
+		// 已经committed但还没apply的entries
 		CommittedEntries: r.raftLog.nextCommittedEnts(rn.applyUnstableEntries()),
+		// 立刻发送给其他节点的消息 必须等待Entries被WAL持久化之后再发送
 		Messages:         r.msgs,
 	}
 	if softSt := r.softState(); !softSt.equal(rn.prevSoftSt) {
@@ -178,8 +183,10 @@ func (rn *RawNode) readyWithoutAccept() Ready {
 		// msgsAfterAppend to be sent out. The Ready struct contract
 		// mandates that Messages cannot be sent until after Entries
 		// are written to stable storage.
+		// 非异步存储场景 此时直接将msgsAfterAppend放入Messages可发送
 		for _, m := range r.msgsAfterAppend {
 			if m.To != r.id {
+				// 启动的时候raft给自己的msgsAfterAppend放了1条msgVoteResponse消息 自己给自己投一票 这个消息不需要告诉上层etcd去发送
 				rd.Messages = append(rd.Messages, m)
 			}
 		}
@@ -417,6 +424,7 @@ func (rn *RawNode) acceptReady(rd Ready) {
 			rn.raft.logger.Panicf("two accepted Ready structs without call to Advance")
 		}
 		for _, m := range rn.raft.msgsAfterAppend {
+			// 这个地方会处理到心跳超时触发的自己给自己模拟的投票赞成
 			if m.To == rn.raft.id {
 				rn.stepsOnAdvance = append(rn.stepsOnAdvance, m)
 			}
@@ -462,6 +470,7 @@ func (rn *RawNode) HasReady() bool {
 	if r.raftLog.hasNextUnstableSnapshot() {
 		return true
 	}
+	// 心跳超时后 Follower会向自己的这两个集合放上数据 msgs放的是要立即给其他节点发送的拉票请求 msgsAfterAppend是自己给自己捏造的投票响应
 	if len(r.msgs) > 0 || len(r.msgsAfterAppend) > 0 {
 		return true
 	}

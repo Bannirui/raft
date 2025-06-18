@@ -16,6 +16,8 @@ package quorum
 
 // JointConfig is a configuration of two groups of (possibly overlapping)
 // majority configurations. Decisions require the support of both majorities.
+// 联合共识下 配置有两个 JointConfig[0]是旧配置 JointConfig[1]是新配置
+// 为什么要做成这样 为了保证配置变更期间系统的安全性和一致性
 type JointConfig [2]MajorityConfig
 
 func (c JointConfig) String() string {
@@ -58,10 +60,14 @@ func (c JointConfig) CommittedIndex(l AckedIndexer) Index {
 // VoteResult takes a mapping of voters to yes/no (true/false) votes and returns
 // a result indicating whether the vote is pending, lost, or won. A joint quorum
 // requires both majority quorums to vote in favor.
+// 两个配置 有个老配置 有个新配置 为什么做成这样
+// 是为了配置变更期间系统的安全性和一致性
 func (c JointConfig) VoteResult(votes map[uint64]bool) VoteResult {
+	// 老配置
 	r1 := c[0].VoteResult(votes)
+	// 新配置
 	r2 := c[1].VoteResult(votes)
-
+	// 必须两个配置都投票赢了
 	if r1 == r2 {
 		// If they agree, return the agreed state.
 		return r1
