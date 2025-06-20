@@ -357,6 +357,7 @@ type raft struct {
 	// 对集群节点的状态跟踪
 	trk tracker.ProgressTracker
 
+	// 节点角色
 	state StateType
 
 	// isLearner is true if the local raft node is a learner.
@@ -389,7 +390,7 @@ type raft struct {
 	msgsAfterAppend []pb.Message
 
 	// the leader id
-	// 当前节点能够感知到的集群中Leader是谁 1-based 0表示没有Leader
+	// 当前节点能够感知到的集群中Leader是谁 1-based 0表示没有Leader或者虽然集群事实上存在Leader但是当前节点感知不到
 	lead uint64
 	// leadTransferee is id of the leader transfer target when its value is not zero.
 	// Follow the procedure defined in raft thesis 3.10.
@@ -415,6 +416,8 @@ type raft struct {
 	// or candidate.
 	// number of ticks since it reached last electionTimeout or received a
 	// valid message from current leader when it is a follower.
+	// raft对上层时钟到期的计数
+	// 比如etcd的一个时钟是100ms 定义raft心跳超时1s 那么就是10个时钟周期就是一个心跳超时
 	electionElapsed int
 
 	// number of ticks since it reached last heartbeatTimeout.
@@ -439,7 +442,7 @@ type raft struct {
 	// Leader是tickHeartbeat
 	// Follower是tickElection
 	tick func()
-	// 不同角色的step回调不一样
+	// 不同角色的step回调不一样 raft的核心 处理消息
 	step stepFunc
 
 	logger Logger
@@ -869,14 +872,16 @@ func (r *raft) appendEntry(es ...pb.Entry) (accepted bool) {
 }
 
 // tickElection is run by followers and candidates after r.electionTimeout.
+// 上层时钟到期后看看raft的心跳超时没有 超时就竞选
 func (r *raft) tickElection() {
+	// 一个心跳超时定时对时钟计数 到达阈值后触发raft的定时任务
 	r.electionElapsed++
 
 	// 当前节点有资格晋升为Leader 心跳超时
 	if r.promotable() && r.pastElectionTimeout() {
-		// 重置 准备进入下一轮
+		// 准备进入下一轮心跳超时 重置对上层时钟计数
 		r.electionElapsed = 0
-		// 这个地方的设计很巧妙 因为term是1-based的 索引用term 0天然标识本地消息驱动流程
+		// EDA驱动
 		if err := r.Step(pb.Message{From: r.id, Type: pb.MsgHup}); err != nil {
 			r.logger.Debugf("error occurred during election: %v", err)
 		}
@@ -915,12 +920,16 @@ func (r *raft) tickHeartbeat() {
 
 // 当前节点角色转换为Follower
 // @Param term 任期号 1-based
-// @Param lead 集群Leader的id 1-based
+// @Param lead 集群Leader的id 1-based 0表示集群没有Leader或者集群虽然事实上存在Leader但是当前节点感知不到
 func (r *raft) becomeFollower(term uint64, lead uint64) {
+	// Follower的回调 处理消息
 	r.step = stepFollower
 	r.reset(term)
+	// Follower的定时回调
 	r.tick = r.tickElection
+	// 当前节点能感知到的集群Leader是谁 节点初始化启动的时候感知不到谁是Leader 那么就是0
 	r.lead = lead
+	// 节点角色
 	r.state = StateFollower
 	r.logger.Infof("%x became follower at term %d", r.id, r.Term)
 
@@ -932,6 +941,7 @@ func (r *raft) becomeCandidate() {
 	if r.state == StateLeader {
 		panic("invalid transition [leader -> candidate]")
 	}
+	// 这个回调用来后面处理接收到的投票 包括自己给自己的投票和别人给自己的投票
 	r.step = stepCandidate
 	r.reset(r.Term + 1)
 	r.tick = r.tickElection
@@ -998,6 +1008,7 @@ func (r *raft) becomeLeader() {
 	r.logger.Infof("%x became leader at term %d", r.id, r.Term)
 }
 
+// 发起选举
 func (r *raft) hup(t CampaignType) {
 	if r.state == StateLeader {
 		r.logger.Debugf("%x ignoring MsgHup because already leader", r.id)
@@ -1066,13 +1077,16 @@ func (r *raft) campaign(t CampaignType) {
 		term = r.Term + 1
 	} else {
 		// 启动后节点的初始化角色是Follower term是0 这个时候会转化角色为Candidate term变成1
+		// 这个地方最重要的是step回调 将来处理收到的投票
 		r.becomeCandidate()
 		// 拉票类型的消息
 		voteMsg = pb.MsgVote
 		term = r.Term
 	}
+	// 从Voters中拿到集群中节点id 准备向这些节点发送拉票
 	var ids []uint64
-	// 跟
+	// Voters就是启动时候手动AppendEntries和applyConfChange添加的集群配置
+	// 如果当初不手动添加Voters这个地方拿到的ids就是空的 也就没办法继续了
 	{
 		idMap := r.trk.Voters.IDs()
 		ids = make([]uint64, 0, len(idMap))
@@ -1090,6 +1104,8 @@ func (r *raft) campaign(t CampaignType) {
 			// send a MsgVote to itself). This response message will be added to
 			// msgsAfterAppend and delivered back to this node after the vote
 			// has been written to stable storage.
+			// 自己给自己发送拉票请求 并不需要真的从发送请求到接收响应走完 既然是自己给自己投票 那肯定是同意 所以直接给自己模拟个赞成票就行
+			// 这个赞成的响应信息会被放到msgsAfterAppend
 			r.send(pb.Message{To: id, Term: term, Type: voteRespMsgType(voteMsg)})
 			continue
 		}
@@ -1102,7 +1118,8 @@ func (r *raft) campaign(t CampaignType) {
 		if t == campaignTransfer {
 			ctx = []byte(t)
 		}
-		// 放到raft的msgs表示要立即发送的消息 上层etcd会来这取数据进行发送
+		// 向集群中其他节点拉票 RPC方式发送拉票请求 放到raft的msgs表示要立即发送的消息 上层etcd会来这取数据进行发送
+		// 然后等待其他节点响应这个拉票请求 也就是发过来投票 触发自己的得票统计
 		r.send(pb.Message{To: id, Term: term, Type: voteMsg, Index: last.index, LogTerm: last.term, Context: ctx})
 	}
 }
@@ -1224,6 +1241,7 @@ func (r *raft) Step(m pb.Message) error {
 		if r.preVote {
 			r.hup(campaignPreElection)
 		} else {
+			// 发起选举
 			r.hup(campaignElection)
 		}
 
@@ -1295,6 +1313,7 @@ func (r *raft) Step(m pb.Message) error {
 		}
 
 	default:
+		// raft处理自己给自己的投票 Candidate的step回调用来处理投票
 		err := r.step(r, m)
 		if err != nil {
 			return err

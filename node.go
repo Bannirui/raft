@@ -370,7 +370,8 @@ func (n *node) run() {
 
 	for {
 		// 在心跳超时后Follower会给msgs和msgsAfterAppend这两个集合放在数据 msgs放的是要给集群其他节点发送的拉票请求 msgsAfterAppend放的是模拟自己给自己的投票响应
-		// advancec的用途是什么 在不是异步存储的场景 默认就是同步方式 怎么保证相间的顺序是同步的呢 就是靠这个通信 raft把ready清单告诉etcd后就把advancec赋值 上层处理完后通过advancec告诉raft 再上层通知处理完之前raft不再向上层发送ready清单
+		// advancec的用途是什么 在不是异步存储的场景 默认就是同步方式 怎么保证相间的顺序是同步的呢 就是靠这个通信
+		// raft把ready清单 这个清单里面就有要给集群其他节点发送的 告诉etcd后就把advancec赋值 上层处理完后通过advancec告诉raft 在上层通知处理完之前raft不再向上层发送ready清单
 		if advancec == nil && n.rn.HasReady() {
 			// Populate a Ready. Note that this Ready is not guaranteed to
 			// actually be handled. We will arm readyc, but there's no guarantee
@@ -465,7 +466,7 @@ func (n *node) run() {
 			case <-n.done:
 			}
 		case <-n.tickc:
-			// 定时触发 驱动心跳和选举
+			// 上层的时钟到期 尝试看看raft的定时到期没 驱动心跳和选举
 			n.rn.Tick()
 		case readyc <- rd: // 把ready清单通过readyc通知给上层
 			// Ready是Raft给上层etcd的一份任务清单 包括 要写入WAL的entry 要发送给其他节点的消息 要apply到状态机的entry
@@ -480,7 +481,11 @@ func (n *node) run() {
 			}
 			readyc = nil
 		case <-advancec:
-			// 通知raft释放旧的ready Raft会清理掉unstable中的已持久化entry 更新applied指针 没有这个步骤 Raft无法前进 防止数据丢失
+			// 上一轮for循环raft通过readyc告诉raftexample有哪些ready清单
+			// 等raftexample处理完那些ready清单后 它会向advancec通知raft自己处理完了
+			// raft收到通知后释放旧的ready
+			// unstable中的数据已经被raftexample持久化了entry raft这个时候就会清理掉unstable 更新applied指针
+			// 如果没有这个步骤 Raft就无法前进 防止数据丢失
 			n.rn.Advance(rd)
 			rd = Ready{}
 			advancec = nil

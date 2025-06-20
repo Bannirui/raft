@@ -56,6 +56,7 @@ func (rn *RawNode) Bootstrap(peers []Peer) error {
 	// TODO(tbg): remove StartNode and give the application the right tools to
 	// bootstrap the initial membership in a cleaner way.
 	// 角色初始化为Follower 为什么是Follower 因为心跳超时事件后发现自己是Follower就会触发选主
+	// 所谓Follower能触发竞选本质是作为Follower raft的step和tick两个回调函数不同
 	rn.raft.becomeFollower(1, None)
 	// 集群的配置 模拟成RPC 既然是模拟 这个地方就假装收到了Leader的AppendEntries就行
 	// 下面就模拟收到AppendEntries的候选流程先放到unstable中 因为是模拟的 所以并不需要对这些模拟的RPC进行回复 直接commit然后应用到raft状态机

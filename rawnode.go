@@ -38,6 +38,8 @@ type RawNode struct {
 	// Mutable fields.
 	prevSoftSt     *SoftState
 	prevHardSt     pb.HardState
+	// 存放是的待raft处理的 就是自己通过ready清单告诉raftexample并且已经被raftexample处理完成了 收到advancec通知后raft就可以处理这部分数据了
+	// 在Follower竞选拉票时会自己给自己上一票赞成票 这个数据最开始放在msgsAfterAppend里面 当raft节点打包ready清单时会把msgsAfterAppend里面自己给自己的消息直接晋升到这个地方等待advancec通知
 	stepsOnAdvance []pb.Message
 }
 
@@ -61,6 +63,8 @@ func NewRawNode(config *Config) (*RawNode, error) {
 }
 
 // Tick advances the internal logical clock by a single tick.
+// 上层时钟到期就是raft执行定时任务的一个契机 此时定时任务可能到期可能还没到期
+// Follower在这个时机点有机会竞选Leader
 func (rn *RawNode) Tick() {
 	rn.raft.tick()
 }
@@ -138,6 +142,7 @@ func (rn *RawNode) Ready() Ready {
 
 // readyWithoutAccept returns a Ready. This is a read-only operation, i.e. there
 // is no obligation that the Ready must be handled.
+// 打包ready清单给上层
 func (rn *RawNode) readyWithoutAccept() Ready {
 	r := rn.raft
 	// 从当前raft状态中提取出一个完整的Ready结构体 只读快照 用于外部逻辑处理 如WAL持久化\发送消息\应用日志等
@@ -148,7 +153,7 @@ func (rn *RawNode) readyWithoutAccept() Ready {
 		Entries:          r.raftLog.nextUnstableEnts(),
 		// 已经committed但还没apply的entries
 		CommittedEntries: r.raftLog.nextCommittedEnts(rn.applyUnstableEntries()),
-		// 立刻发送给其他节点的消息 必须等待Entries被WAL持久化之后再发送
+		// 立刻发送给其他节点的消息 必须等待Entries被WAL持久化之后再发送 raft只负责把要发送的数据告诉上层 至于持久化这个动作 也是由上层调用raft
 		Messages:         r.msgs,
 	}
 	if softSt := r.softState(); !softSt.equal(rn.prevSoftSt) {
@@ -187,6 +192,7 @@ func (rn *RawNode) readyWithoutAccept() Ready {
 		for _, m := range r.msgsAfterAppend {
 			if m.To != r.id {
 				// 启动的时候raft给自己的msgsAfterAppend放了1条msgVoteResponse消息 自己给自己投一票 这个消息不需要告诉上层etcd去发送
+				// 那么什么时候会处理这个自己给自己的投票呢 当有别的节点发来投票时候 会借着这个时机点一起处理掉自己给自己的投票
 				rd.Messages = append(rd.Messages, m)
 			}
 		}
@@ -425,6 +431,7 @@ func (rn *RawNode) acceptReady(rd Ready) {
 		}
 		for _, m := range rn.raft.msgsAfterAppend {
 			// 这个地方会处理到心跳超时触发的自己给自己模拟的投票赞成
+			// 因为是自己给自己投票 假装是上层处理过后待raft处理的 所以这个地方借着打包ready清单时机直接把msgsAfterAppend里面自己给自己的消息放到stepsOnAdvance里面 等到advancec的通知后raft处理它们
 			if m.To == rn.raft.id {
 				rn.stepsOnAdvance = append(rn.stepsOnAdvance, m)
 			}
@@ -458,6 +465,7 @@ func (rn *RawNode) applyUnstableEntries() bool {
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
+// 看看当前raft节点有没有ready清单要交给上层的
 func (rn *RawNode) HasReady() bool {
 	// TODO(nvanbenschoten): order these cases in terms of cost and frequency.
 	r := rn.raft
@@ -488,6 +496,8 @@ func (rn *RawNode) HasReady() bool {
 //
 // NOTE: Advance must not be called when using AsyncStorageWrites. Response messages from
 // the local append and apply threads take its place.
+// raft把ready清单通过readyc投递给raftexample
+// raftexample处理完后通过advancec通知raft
 func (rn *RawNode) Advance(_ Ready) {
 	// The actions performed by this function are encoded into stepsOnAdvance in
 	// acceptReady. In earlier versions of this library, they were computed from
@@ -495,6 +505,8 @@ func (rn *RawNode) Advance(_ Ready) {
 	if rn.asyncStorageWrites {
 		rn.raft.logger.Panicf("Advance must not be called when using AsyncStorageWrites")
 	}
+	// raft在打包ready清单时候已经把自己给自己的投票放到了stepsOnAdvance里面了
+	// 在收到raftexample的advance通知后 这个时机就可以处理到那个投票 进入得票统计流程
 	for i, m := range rn.stepsOnAdvance {
 		_ = rn.raft.Step(m)
 		rn.stepsOnAdvance[i] = pb.Message{}
