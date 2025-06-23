@@ -62,6 +62,7 @@ func (c JointConfig) CommittedIndex(l AckedIndexer) Index {
 // requires both majority quorums to vote in favor.
 // 两个配置 有个老配置 有个新配置 为什么做成这样
 // 是为了配置变更期间系统的安全性和一致性
+// @Return VoteResult 竞选Leader结果 3-Candidate胜出可以当Leader
 func (c JointConfig) VoteResult(votes map[uint64]bool) VoteResult {
 	// 老配置
 	r1 := c[0].VoteResult(votes)

@@ -1125,8 +1125,11 @@ func (r *raft) campaign(t CampaignType) {
 }
 
 // 收到了来自id的一次投票
-// @Param id 谁发的投票
+// @Param id 谁发的投票 可能是自己给自己的投票 也可能是别人给自己的投票
 // @Param v 投的什么票 True表示赞成票 False表示反对票
+// @Param granted 得到的赞成票
+// @Param rejected 得到的反对票
+// @result 竞选结果 3-竞选Leader成功
 func (r *raft) poll(id uint64, t pb.MessageType, v bool) (granted int, rejected int, result quorum.VoteResult) {
 	if v {
 		r.logger.Infof("%x received %s from %x at term %d", r.id, t, id, r.Term)
@@ -1749,7 +1752,7 @@ func stepCandidate(r *raft, m pb.Message) error {
 		r.becomeFollower(m.Term, m.From) // always m.Term == r.Term
 		r.handleSnapshot(m)
 	case myVoteRespType:
-		// 收到了别人对自己的选举投票 触发得票统计看看自己有没有竞选Leader成功
+		// 收到了选举投票 可能是自己给自己投的 也可能是别人给自己投的 触发得票统计看看自己有没有竞选Leader成功
 		gr, rj, res := r.poll(m.From, m.Type, !m.Reject)
 		r.logger.Infof("%x has received %d %s votes and %d vote rejections", r.id, gr, m.Type, rj)
 		switch res {

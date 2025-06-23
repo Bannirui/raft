@@ -131,6 +131,7 @@ type ProgressTracker struct {
 	// 选举时 投票状态的统计
 	// 投票箱 哪些投了赞成票 哪些投了反对票 不在这个map的就是还没收到那个节点的投票结果
 	// 这个投票箱的目的是用来记录 某个节点在当前term中对谁投了票 当前候选人收到了多少投票
+	// 投票箱只负责收集投票 记录谁投了赞成票谁投了反对票 不管投票的人是不是集群一员
 	Votes map[uint64]bool
 
 	MaxInflight      int
@@ -262,10 +263,11 @@ func (p *ProgressTracker) ResetVotes() {
 
 // RecordVote records that the node with the given id voted for this Raft
 // instance if v == true (and declined it otherwise).
-// 记录投票结果
+// 记录投票结果 只负责记录投票 不在乎投票的人是不是集群一员
 // @Param id 发起投票的raft节点
 // @Param v id对我竞选Leader的投票结果 True是赞成 False是反对
 func (p *ProgressTracker) RecordVote(id uint64, v bool) {
+	// 看看投票箱有没有投票记录
 	_, ok := p.Votes[id]
 	if !ok {
 		// 一个选举生命周期只统计别人对自己的一次投票
@@ -275,6 +277,9 @@ func (p *ProgressTracker) RecordVote(id uint64, v bool) {
 
 // TallyVotes returns the number of granted and rejected Votes, and whether the
 // election outcome is known.
+// @Return granted 赞成票几票
+// @Return rejected 反对票几票
+// @Return VoteResult 竞选得票结果 3-Candidate竞选成功可以当Leader
 func (p *ProgressTracker) TallyVotes() (granted int, rejected int, _ quorum.VoteResult) {
 	// Make sure to populate granted/rejected correctly even if the Votes slice
 	// contains members no longer part of the configuration. This doesn't really
@@ -284,16 +289,21 @@ func (p *ProgressTracker) TallyVotes() (granted int, rejected int, _ quorum.Vote
 		if pr.IsLearner {
 			continue
 		}
+		// 投票箱看看谁投了赞成票谁投了反对票
 		v, voted := p.Votes[id]
 		if !voted {
+			// 投票的人不是集群一员 不要计票
 			continue
 		}
 		if v {
+			// 赞成票数
 			granted++
 		} else {
+			// 反对票数
 			rejected++
 		}
 	}
+	// 竞选结果
 	result := p.Voters.VoteResult(p.Votes)
 	return granted, rejected, result
 }

@@ -164,6 +164,8 @@ func (c MajorityConfig) CommittedIndex(l AckedIndexer) Index {
 // a result indicating whether the vote is pending (i.e. neither a quorum of
 // yes/no has been reached), won (a quorum of yes has been reached), or lost (a
 // quorum of no has been reached).
+// 统计投票箱 过半投自己赞成票就说明自己有资格成为Leader了
+// @Param votes 投票箱
 func (c MajorityConfig) VoteResult(votes map[uint64]bool) VoteResult {
 	if len(c) == 0 {
 		// By convention, the elections on an empty config win. This comes in
@@ -174,7 +176,9 @@ func (c MajorityConfig) VoteResult(votes map[uint64]bool) VoteResult {
 
 	var votedCnt int //vote counts for yes.
 	var missing int
+	// 轮询集群中节点id
 	for id := range c {
+		// 从投票箱中找节点id的投票
 		v, ok := votes[id]
 		if !ok {
 			// 还没投票的节点数量 可能人家还没发起投票 也可能投票结果还在路上
@@ -182,6 +186,7 @@ func (c MajorityConfig) VoteResult(votes map[uint64]bool) VoteResult {
 			continue
 		}
 		if v {
+			// 投了赞成票
 			votedCnt++
 		}
 	}
